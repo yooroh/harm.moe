@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<style>
+    * { margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<img id="jaklicImg" style="display:none" src="swat.png">
+<script>
+    var canvas = document.getElementById('c');
+    var ctx = canvas.getContext('2d');
+    var w, h, groundY;
+
+    function resize() {
+        w = window.innerWidth;
+        h = window.innerHeight;
+        canvas.width = w;
+        canvas.height = h;
+        groundY = h - 40;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    var img = document.getElementById('jaklicImg');
+
+    var player = {
+        x: 80,
+        y: groundY,
+        w: 44,
+        h: 44,
+        vy: 0,
+        gravity: 0.35,
+        jumpPower: -18,
+        grounded: true,
+        draw: function() {
+            if (img && img.complete) {
+                ctx.drawImage(img, this.x - this.w/2, this.y - this.h, this.w, this.h);
+            } else {
+                ctx.fillStyle = '#333';
+                ctx.fillRect(this.x - this.w/2, this.y - this.h, this.w, this.h);
+            }
+        },
+        update: function() {
+            this.vy += this.gravity;
+            this.y += this.vy;
+            if (this.y >= groundY) {
+                this.y = groundY; this.vy = 0; this.grounded = true;
+            } else {
+                this.grounded = false;
+            }
+        },
+        jump: function() {
+            if (this.grounded) {
+                this.vy = this.jumpPower; this.grounded = false;
+            }
+        },
+        rect: function() { return {x: this.x - this.w/2, y: this.y - this.h, w: this.w, h: this.h}; },
+        hitRect: function() {
+            var insetX = this.w * 0.28;
+            var insetTop = this.h * 0.18;
+            var insetBot = this.h * 0.08;
+            return {
+                x: this.x - this.w/2 + insetX,
+                y: this.y - this.h + insetTop,
+                w: this.w - insetX * 2,
+                h: this.h - insetTop - insetBot
+            };
+        }
+    };
+
+    var obstacles = [];
+    var spawnCooldown = 0;
+    var spawnMin = 0.9, spawnMax = 1.7;
+    var baseSpeed = 550;
+    var speed = baseSpeed;
+    var score = 0;
+    var scoreAcc = 0;
+    var highScore = 0;
+    var gameOver = false;
+
+    // ASCII-art image overlay
+    var asciiTriggered = false;
+    var asciiAlpha = 0;
+    var asciiConsumed = false;
+    var asciiFadeDuration = 2.0;
+    var asciiTriggerScore = 100;
+    var asciiImg = new Image();
+    var asciiImgLoaded = false;
+    asciiImg.src = 'ascii-art-modified.png';
+    asciiImg.onload = function(){ asciiImgLoaded = true; };
+    var asciiYOffset = 20;
+
+    // day/night cycle
+    var dayTime = 0;
+    var dayCycle = 40.0;
+    var nightStrength = 0;
+
+    // jaysmom background image
+    var jaysImg = new Image();
+    var jaysImgLoaded = false;
+    var jaysAlpha = 0;
+    var jaysFadeInStart = 300;
+    var jaysFadeInDuration = 3.0;
+    var jaysFadeOutStart = 400;
+    var jaysFadeOutDuration = 3.0;
+    jaysImg.src = 'jaysmom.png';
+    jaysImg.onload = function(){ jaysImgLoaded = true; };
+
+    // rock image (generated in-memory)
+    var rockBaseW = 56, rockBaseH = 36;
+    var rockYOffset = 6;
+    var rockImg = new Image();
+    (function(){
+        var oc = document.createElement('canvas');
+        oc.width = rockBaseW; oc.height = rockBaseH;
+        var octx = oc.getContext('2d');
+        var left = rockBaseW * 0.12;
+        var right = rockBaseW - left;
+        var topY = rockBaseH * 0.20;
+        var bottomY = rockBaseH * 0.86;
+        octx.fillStyle = '#999';
+        octx.beginPath();
+        octx.moveTo(left, bottomY);
+        octx.quadraticCurveTo(rockBaseW*0.25, rockBaseH*0.06, rockBaseW/2, topY);
+        octx.quadraticCurveTo(rockBaseW*0.75, rockBaseH*0.06, right, bottomY);
+        octx.closePath();
+        octx.fill();
+        var g = octx.createLinearGradient(0, topY, 0, bottomY);
+        g.addColorStop(0, 'rgba(255,255,255,0.02)');
+        g.addColorStop(1, 'rgba(0,0,0,0.14)');
+        octx.fillStyle = g;
+        octx.beginPath();
+        octx.moveTo(left, bottomY);
+        octx.quadraticCurveTo(rockBaseW*0.25, rockBaseH*0.06, rockBaseW/2, topY);
+        octx.quadraticCurveTo(rockBaseW*0.75, rockBaseH*0.06, right, bottomY);
+        octx.closePath();
+        octx.fill();
+        octx.fillStyle = 'rgba(255,255,255,0.06)';
+        octx.beginPath();
+        octx.ellipse(rockBaseW*0.42, rockBaseH*0.34, rockBaseW*0.18, rockBaseH*0.12, -0.3, 0, Math.PI*2);
+        octx.fill();
+        rockImg.src = oc.toDataURL();
+    })();
+
+    var rockArt = ["  ___ "," / _ \\","| (_) |"," \\___/ "];
+
+    // background layers
+    var clouds = [];
+    var trees = [];
+
+    function spawnCloud(x) {
+        x = (typeof x === 'number') ? x : w + Math.random()*200;
+        var size = 0.6 + Math.random() * 0.7;
+        clouds.push({x:x, y: 35 + Math.random()*85, parallax: 0.2 + Math.random()*0.25, size: size});
+    }
+    function spawnTree(x) {
+        x = (typeof x === 'number') ? x : w + Math.random()*300;
+        var th = 40 + Math.random() * 35;
+        trees.push({x:x, y: groundY, parallax: 0.55 + Math.random()*0.35, h: th});
+    }
+
+    function spawnObstacle() {
+        obstacles.push({x: w + 10, y: groundY, w: rockBaseW, h: rockBaseH, passed:false});
+    }
+
+    function rectsOverlap(a, b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    function reset() {
+        obstacles = [];
+        spawnCooldown = 0;
+        score = 0; scoreAcc = 0;
+        speed = baseSpeed;
+        player.y = groundY; player.vy = 0; player.grounded = true;
+        gameOver = false;
+        clouds = [];
+        trees = [];
+        dayTime = 0; nightStrength = 0;
+        asciiAlpha = 0; asciiTriggered = false; asciiConsumed = false;
+        jaysAlpha = 0;
+        for (var i=0;i<5;i++) spawnCloud(Math.random()*w);
+        for (var j=0;j<4;j++) spawnTree(Math.random()*w);
+    }
+
+    function update(dt) {
+        if (gameOver) return;
+
+        dayTime += dt;
+        var t = (dayTime % dayCycle) / dayCycle;
+        nightStrength = (1 - Math.cos(2 * Math.PI * t)) / 2;
+
+        // constant speed
+        speed = baseSpeed;
+
+        // spawn
+        spawnCooldown -= dt;
+        if (spawnCooldown <= 0) {
+            spawnCooldown = spawnMin + Math.random() * (spawnMax - spawnMin);
+            spawnObstacle();
+        }
+
+        // obstacles
+        for (var i = obstacles.length-1; i >= 0; i--) {
+            var o = obstacles[i];
+            o.x -= speed * dt;
+            if (o.x + o.w < -10) { obstacles.splice(i,1); continue; }
+            // tight hitbox for rock
+            var rockHit = {
+                x: o.x + o.w * 0.2,
+                y: o.y - o.h + rockYOffset + o.h * 0.15,
+                w: o.w * 0.6,
+                h: o.h * 0.75
+            };
+            if (rectsOverlap(player.hitRect(), rockHit)) {
+                gameOver = true;
+                if (score > highScore) highScore = score;
+                asciiAlpha = 0; asciiTriggered = false;
+                dayTime = 0; nightStrength = 0;
+            }
+        }
+
+        // clouds
+        for (var ci = clouds.length-1; ci >= 0; ci--) {
+            clouds[ci].x -= speed * dt * clouds[ci].parallax;
+            if (clouds[ci].x < -200) {
+                clouds.splice(ci,1);
+                if (!asciiTriggered) spawnCloud(w + Math.random()*200);
+            }
+        }
+        // trees
+        for (var ti = trees.length-1; ti >= 0; ti--) {
+            trees[ti].x -= speed * dt * trees[ti].parallax;
+            if (trees[ti].x < -200) {
+                trees.splice(ti,1);
+                if (!asciiTriggered) spawnTree(w + Math.random()*300);
+            }
+        }
+
+        // ascii fade-out at 200
+        var asciiFadeOutStart = 200;
+        var asciiFadeOutDuration = 3.0;
+        if (asciiTriggered && score >= asciiFadeOutStart) {
+            asciiAlpha -= dt / asciiFadeOutDuration;
+            if (asciiAlpha <= 0) {
+                asciiAlpha = 0; asciiTriggered = false; asciiConsumed = true;
+                if (trees.length < 3) for (var a=0;a<3;a++) spawnTree(w + Math.random()*w + a*60);
+                if (clouds.length < 2) for (var b=0;b<2;b++) spawnCloud(w + Math.random()*w + b*120);
+            }
+        }
+
+        // jaysmom fade
+        if (score >= jaysFadeInStart && score < jaysFadeOutStart) {
+            jaysAlpha += dt / jaysFadeInDuration;
+            if (jaysAlpha > 1) jaysAlpha = 1;
+        } else if (score >= jaysFadeOutStart) {
+            jaysAlpha -= dt / jaysFadeOutDuration;
+            if (jaysAlpha < 0) jaysAlpha = 0;
+        }
+
+        if (nightStrength < 0) nightStrength = 0;
+        if (nightStrength > 1) nightStrength = 1;
+
+        player.update();
+
+        var asciiFadingOut = (asciiTriggered && score >= asciiFadeOutStart);
+        if (!asciiTriggered && !asciiConsumed && score >= asciiTriggerScore) {
+            asciiTriggered = true; asciiAlpha = 0;
+        }
+        if (asciiTriggered && !asciiFadingOut && asciiAlpha < 1) {
+            asciiAlpha += dt / asciiFadeDuration;
+            if (asciiAlpha > 1) asciiAlpha = 1;
+        }
+    }
+
+    function lerpColor(day, night, n) {
+        return 'rgb('+Math.round(day.r*(1-n)+night.r*n)+','+Math.round(day.g*(1-n)+night.g*n)+','+Math.round(day.b*(1-n)+night.b*n)+')';
+    }
+
+    function draw() {
+
+        // sky
+        var dayCol = {r:173,g:216,b:230};
+        var nightCol = {r:43,g:43,b:43};
+        var sr = Math.round(dayCol.r*(1-nightStrength)+nightCol.r*nightStrength);
+        var sg = Math.round(dayCol.g*(1-nightStrength)+nightCol.g*nightStrength);
+        var sb = Math.round(dayCol.b*(1-nightStrength)+nightCol.b*nightStrength);
+        ctx.fillStyle = 'rgb('+sr+','+sg+','+sb+')';
+        ctx.fillRect(0,0,w,h);
+
+        // clouds — puffy circles
+        for (var ci=0; ci<clouds.length; ci++) {
+            var c = clouds[ci];
+            var s = c.size || 1;
+            ctx.save();
+            ctx.fillStyle = lerpColor({r:235,g:240,b:245},{r:55,g:55,b:60}, nightStrength);
+            ctx.globalAlpha = 0.85;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, 18*s, 0, Math.PI*2);
+            ctx.arc(c.x + 20*s, c.y - 8*s, 22*s, 0, Math.PI*2);
+            ctx.arc(c.x + 45*s, c.y - 4*s, 20*s, 0, Math.PI*2);
+            ctx.arc(c.x + 60*s, c.y + 2*s, 16*s, 0, Math.PI*2);
+            ctx.arc(c.x + 30*s, c.y + 6*s, 18*s, 0, Math.PI*2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // sun / moon
+        var sunPhase = Math.max(0, Math.min(1, (0.5 - nightStrength) / 0.5));
+        var moonPhase = Math.max(0, Math.min(1, (nightStrength - 0.5) / 0.5));
+        if (sunPhase > 0.01) {
+            ctx.save();
+            var sunX = w * 0.15, sunTop = 60, sunBottom = 220;
+            var sunY = sunBottom - sunPhase * (sunBottom - sunTop);
+            var sunR = 22 + 6 * sunPhase;
+            ctx.globalAlpha = sunPhase * 0.95;
+            var g = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.2);
+            g.addColorStop(0, '#fff9b0'); g.addColorStop(0.6, '#ffd86a'); g.addColorStop(1, 'rgba(255,200,50,0)');
+            ctx.fillStyle = g;
+            ctx.beginPath(); ctx.arc(sunX, sunY, sunR, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+        if (moonPhase > 0.01) {
+            ctx.save();
+            var moonX = w * 0.85, moonTop = 60, moonBottom = 220;
+            var moonY = moonBottom - moonPhase * (moonBottom - moonTop);
+            var moonR = 18 + 6 * moonPhase;
+            ctx.globalAlpha = moonPhase * 0.95;
+            ctx.fillStyle = '#ffeb7a';
+            ctx.beginPath(); ctx.arc(moonX, moonY, moonR, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = 'rgb('+sr+','+sg+','+sb+')';
+            ctx.beginPath(); ctx.arc(moonX + moonR*0.35, moonY - moonR*0.15, moonR*0.9, 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+        }
+
+// ascii overlay (with locked background color)
+if (asciiAlpha > 0 && asciiImgLoaded) {
+    ctx.save();
+
+    // draw solid background FIRST (locks color)
+    ctx.globalAlpha = asciiAlpha;
+    ctx.fillStyle = 'rgb(173,216,230)';
+    ctx.fillRect(0, 0, w, h);
+
+    // then draw the ascii image
+    ctx.globalAlpha = Math.min(0.9, asciiAlpha * 0.9);
+    var iw = asciiImg.width, ih = asciiImg.height;
+    var sc = Math.max(w / iw, h / ih);
+    var dw = iw * sc, dh = ih * sc;
+    ctx.drawImage(
+        asciiImg,
+        (w - dw) / 2,
+        (h - dh) / 2 + asciiYOffset,
+        dw,
+        dh
+    );
+
+    ctx.restore();
+}
+
+
+        // jaysmom overlay
+        if (jaysAlpha > 0) {
+            ctx.save();
+            ctx.globalAlpha = Math.min(0.9, jaysAlpha * 0.9);
+            if (jaysImgLoaded) {
+                var iw2 = jaysImg.width, ih2 = jaysImg.height;
+                var sc2 = Math.max(w / iw2, h / ih2);
+                var dw2 = iw2*sc2, dh2 = ih2*sc2;
+                ctx.drawImage(jaysImg, (w-dw2)/2, (h-dh2)/2 + asciiYOffset, dw2, dh2);
+            }
+            ctx.restore();
+        }
+
+        // trees — drawn as pine tree shapes
+        for (var ti=0; ti<trees.length; ti++) {
+            var tr = trees[ti];
+            var th = tr.h || 55;
+            var tw2 = th * 0.65;
+            var trunkW = tw2 * 0.18;
+            var trunkH = th * 0.25;
+            var bx = tr.x, by = tr.y;
+
+            // trunk
+            ctx.fillStyle = lerpColor({r:80,g:55,b:30},{r:180,g:175,b:170}, nightStrength);
+            ctx.fillRect(bx - trunkW/2, by - trunkH, trunkW, trunkH);
+
+            // canopy — two stacked triangles
+            ctx.fillStyle = lerpColor({r:55,g:120,b:55},{r:200,g:210,b:200}, nightStrength);
+            var canopyBase = by - trunkH + 4;
+            ctx.beginPath();
+            ctx.moveTo(bx, canopyBase - th * 0.5);
+            ctx.lineTo(bx - tw2/2, canopyBase);
+            ctx.lineTo(bx + tw2/2, canopyBase);
+            ctx.closePath();
+            ctx.fill();
+            var topBase = canopyBase - th * 0.22;
+            ctx.beginPath();
+            ctx.moveTo(bx, canopyBase - th * 0.75);
+            ctx.lineTo(bx - tw2*0.38, topBase);
+            ctx.lineTo(bx + tw2*0.38, topBase);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        // ground
+        ctx.save();
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, groundY, w, h - groundY);
+        ctx.lineWidth = 1;
+        for (var gy = groundY + 2; gy < h - 2; gy += 6) {
+            var jitter = (Math.random()*2 - 1) * 0.8;
+            ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+            ctx.beginPath(); ctx.moveTo(0, gy + jitter); ctx.lineTo(w, gy + jitter); ctx.stroke();
+        }
+        ctx.restore();
+
+        // player
+        player.draw();
+
+        // obstacles
+        obstacles.forEach(function(o){
+            if (rockImg && rockImg.complete) {
+                var rockNight = Math.min(1, nightStrength * 3);
+                var brightness = 1 + 0.9 * rockNight;
+                try { ctx.filter = 'brightness(' + brightness + ')'; } catch(e) {}
+                ctx.drawImage(rockImg, o.x, o.y - o.h + rockYOffset, o.w, o.h);
+                ctx.filter = 'none';
+            } else {
+                ctx.fillStyle = '#111';
+                var fontSize = Math.max(10, Math.floor(o.h / rockArt.length));
+                ctx.save(); ctx.font = fontSize + 'px monospace'; ctx.textAlign = 'center';
+                for (var li=0; li<rockArt.length; li++) {
+                    ctx.fillText(rockArt[li], o.x + o.w/2, o.y - (rockArt.length - li - 1) * fontSize * 0.95 + rockYOffset);
+                }
+                ctx.restore();
+            }
+        });
+
+        // score
+        ctx.save();
+        ctx.font = '16px monospace'; ctx.textAlign = 'right';
+        ctx.lineJoin = 'round'; ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillStyle = '#ffd700';
+        ctx.strokeText('Score: ' + score, w - 10, 24);
+        ctx.fillText('Score: ' + score, w - 10, 24);
+        ctx.strokeText('High: ' + highScore, w - 10, 44);
+        ctx.fillText('High: ' + highScore, w - 10, 44);
+        ctx.restore();
+
+        if (gameOver) {
+            ctx.fillStyle = 'rgba(255,255,255,0.8)';
+            ctx.fillRect(w/2 - 140, h/2 - 40, 280, 80);
+            ctx.fillStyle = '#000'; ctx.textAlign = 'center'; ctx.font = '20px sans-serif';
+            ctx.fillText('Game Over', w/2, h/2 - 4);
+            ctx.font = '14px sans-serif'; ctx.fillText('Press Space / Click to restart', w/2, h/2 + 20);
+        }
+    }
+
+    var lastTs = null;
+    function loop(ts) {
+        if (!ts) ts = performance.now();
+        if (lastTs === null) lastTs = ts;
+        var dt = (ts - lastTs) / 1000;
+        lastTs = ts;
+        update(dt);
+        if (!gameOver) {
+            scoreAcc += 10 * dt;
+            score = Math.floor(scoreAcc);
+        }
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    window.addEventListener('keydown', function(e){
+        if (e.code === 'Space' || e.code === 'ArrowUp') {
+            e.preventDefault();
+            if (gameOver) reset(); else player.jump();
+        }
+    });
+    canvas.addEventListener('mousedown', function(){ if (gameOver) reset(); else player.jump(); });
+    canvas.addEventListener('touchstart', function(e){ e.preventDefault(); if (gameOver) reset(); else player.jump(); });
+
+    reset();
+    requestAnimationFrame(loop);
+</script>
+</body>
+</html>
